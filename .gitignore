@@ -1,7 +1,6 @@
 .env
 node_modules/*
-./temp/*
-./package-lock.json
+temp/*
 
 .wwebjs_auth/*
 .wwebjs_cache/*
