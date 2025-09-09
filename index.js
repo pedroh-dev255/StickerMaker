@@ -10,6 +10,21 @@ if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir);
 }
 
+const logFile = path.join(__dirname, "stickers.json");
+
+// Inicializa o log de stickers
+if (!fs.existsSync(logFile)) {
+  fs.writeFileSync(logFile, JSON.stringify({}, null, 2));
+}
+
+function loadLog() {
+  return JSON.parse(fs.readFileSync(logFile, "utf-8"));
+}
+
+function saveLog(data) {
+  fs.writeFileSync(logFile, JSON.stringify(data, null, 2));
+}
+
 // Configuração do cliente WhatsApp
 const client = new Client({
   authStrategy: new LocalAuth(),
@@ -38,13 +53,17 @@ client.on("message", async (msg) => {
 
   // Caso o usuário envie "!todos"
   if (msg.body.toLowerCase() === "!todos") {
-    const files = fs.readdirSync(tempDir);
-    if (files.length === 0) {
-      return msg.reply("🤖: Nenhum sticker foi criado ainda.");
+    const logData = loadLog();
+    const userStickers = logData[chatId] || [];
+
+    if (userStickers.length === 0) {
+      return msg.reply("🤖: Nenhum sticker foi criado por você ainda.");
     }
 
-    for (const file of files) {
+    for (const file of userStickers) {
       const filePath = path.join(tempDir, file);
+      if (!fs.existsSync(filePath)) continue;
+
       const data = fs.readFileSync(filePath, { encoding: "base64" });
       const mimeType = file.endsWith(".mp4") ? "video/mp4" : "image/png";
 
@@ -54,6 +73,7 @@ client.on("message", async (msg) => {
     return;
   }
 
+  // Usuário enviou mídia para gerar sticker
   if (waitingForSticker.has(chatId)) {
     if (msg.hasMedia) {
       try {
@@ -65,6 +85,12 @@ client.on("message", async (msg) => {
           const filePath = path.join(tempDir, fileName);
 
           fs.writeFileSync(filePath, media.data, "base64");
+
+          // Atualiza log
+          const logData = loadLog();
+          if (!logData[chatId]) logData[chatId] = [];
+          logData[chatId].push(fileName);
+          saveLog(logData);
 
           // Enviar como sticker
           await client.sendMessage(chatId, new MessageMedia(media.mimetype, media.data, null), {

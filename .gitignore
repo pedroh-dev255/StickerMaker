@@ -1,6 +1,6 @@
 .env
 node_modules/*
 temp/*
-
+stickers.json
 .wwebjs_auth/*
 .wwebjs_cache/*
