@@ -79,6 +79,8 @@ client.on("ready", () => {
   console.log("Bot on");
 });
 
+const multiStickerSessions = new Map();
+
 client.on("message", async (msg) => {
   // pega chat e contato (sempre tentei usar msg.getChat/getContact como você já estava fazendo)
   let chat, contact;
@@ -99,15 +101,95 @@ client.on("message", async (msg) => {
   const groupName = isGroup ? (chat.name || null) : null;
 
   const chatId = msg.from; // mantém seu uso original para replies e para casos que queira identificar o chat de origem
+  
+  const lowerBody = msg.body?.toLowerCase();
 
   // Caso o usuário envie "!sticker"
-  if (msg.body && msg.body.toLowerCase() === "!sticker") {
+  if (lowerBody === "!sticker") {
     waitingForSticker.set(chatId, true);
     return msg.reply("🤖: Envie agora uma *imagem* ou *vídeo* para transformar em sticker.");
   }
 
+  // --- Início do novo comando !stickers ---
+  if (lowerBody === "!stickers") {
+    multiStickerSessions.set(chatId, []);
+    return msg.reply("🤖: Modo múltiplos stickers ativado!\n Envie várias imagens ou vídeos e digite\n*!pronto* quando terminar.");
+  }
+
+  if (lowerBody === "!pronto" && multiStickerSessions.has(chatId)) {
+    const queue = multiStickerSessions.get(chatId);
+    multiStickerSessions.delete(chatId);
+
+    if (!queue || queue.length === 0) {
+      return msg.reply("🤖: Nenhuma mídia recebida. Processo cancelado.");
+    }
+
+    msg.reply("🤖: Processando Stickers...");
+
+    let processed = 0;
+    let failed = 0;
+
+    // Aguarda todas as mídias baixarem
+    const files = await Promise.all(queue);
+
+    await Promise.all(files.map(async (fileObj) => {
+      if (!fileObj) { // download falhou
+        failed++;
+        return;
+      }
+
+      try {
+        const { media, msgType, contactName, contactId, isGroup, groupName } = fileObj;
+
+        if (!["image", "video"].includes(msgType)) {
+          failed++;
+          return;
+        }
+
+        const ext = media.mimetype.includes("video") ? ".mp4" : ".png";
+        const fileName = `sticker_${Date.now()}_${Math.floor(Math.random()*1000)}${ext}`;
+        const filePath = path.join(tempDir, fileName);
+
+        await fsp.writeFile(filePath, media.data, "base64");
+        await saveStickerToDB(contactName, contactId, isGroup, groupName, fileName);
+
+        await client.sendMessage(chatId, new MessageMedia(media.mimetype, media.data, null), { sendMediaAsSticker: true });
+        processed++;
+      } catch (err) {
+        console.error("Erro ao processar mídia:", err);
+        failed++;
+      }
+    }));
+
+    return msg.reply(`🤖: Stickers processados!\n✅ Sucesso: ${processed}\n❌ Falha: ${failed}`);
+  }
+
+  // --- Caso esteja em modo múltiplos stickers e receba uma mídia ---
+  if (multiStickerSessions.has(chatId) && msg.hasMedia) {
+    const downloadPromise = msg.downloadMedia({ unsafeMime: true })
+      .then(media => ({
+        media,
+        msgType: msg.type,
+        contactName,
+        contactId,
+        isGroup,
+        groupName
+      }))
+      .catch(err => {
+        console.error("Erro ao baixar mídia:", err);
+        return null; // marca como falha
+      });
+
+    const queue = multiStickerSessions.get(chatId);
+    queue.push(downloadPromise);
+    multiStickerSessions.set(chatId, queue);
+
+    //return msg.reply("🤖: Mídia adicionada à fila. Continue enviando ou digite !pronto.");
+  }
+
+
   // Caso o usuário envie "!todos" -> agora busca por contactId (stickers que o usuário criou)
-  if (msg.body && msg.body.toLowerCase() === "!todos") {
+  if (lowerBody === "!todos") {
     try {
       const userStickers = await getStickersByContact(contactId);
 
