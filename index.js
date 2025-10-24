@@ -188,30 +188,71 @@ client.on("message", async (msg) => {
   }
 
 
-  // Caso o usuário envie "!todos" -> agora busca por contactId (stickers que o usuário criou)
-  if (lowerBody === "!todos") {
+  // --- Relatório de stickers (!todos) ---
+  if (lowerBody === "!todos" || lowerBody === "!relatorio") {
     try {
-      const userStickers = await getStickersByContact(contactId);
+      const [rows] = await dbPool.execute(
+        "SELECT is_group, COUNT(*) AS total FROM stickers WHERE contact_id = ? GROUP BY is_group",
+        [contactId]
+      );
 
-      if (!userStickers || userStickers.length === 0) {
-        return msg.reply("🤖: Nenhum sticker foi criado por você ainda.");
+      let total = 0, groupCount = 0, privateCount = 0;
+      for (const row of rows) {
+        total += row.total;
+        if (row.is_group) groupCount += row.total;
+        else privateCount += row.total;
       }
 
-      for (const file of userStickers) {
+      return msg.reply(`🤖: Você já gerou ${total} sticker(s)\n✅ Pelo grupo: ${groupCount}\n✅ Pelo privado: ${privateCount}\n\nPara exibir os stickers, digite !exibir`);
+    } catch (err) {
+      console.error("Erro ao gerar relatório de stickers:", err);
+      return msg.reply("🤖: Erro ao gerar relatório. Tente novamente mais tarde.");
+    }
+  }
+
+  // --- Exibir stickers paginados (!exibir ou !exibir X) ---
+  if (lowerBody.startsWith("!exibir")) {
+    try {
+      // Página solicitada
+      let page = 1;
+      const match = lowerBody.match(/!exibir\s+(\d+)/);
+      if (match) page = parseInt(match[1]) || 1;
+
+      const stickers = await getStickersByContact(contactId);
+      if (!stickers || stickers.length === 0) {
+        return msg.reply("🤖: Você ainda não criou nenhum sticker.");
+      }
+
+      const perPage = 5;
+      const totalPages = Math.ceil(stickers.length / perPage);
+
+      if (page < 1 || page > totalPages) {
+        return msg.reply(`🤖: Página inválida. Informe um número entre 1 e ${totalPages}`);
+      }
+
+      const start = (page - 1) * perPage;
+      const end = start + perPage;
+      const stickersPage = stickers.slice(start, end);
+
+      for (const file of stickersPage) {
         const filePath = path.join(tempDir, file);
-        if (!fs.existsSync(filePath)) continue;
+        if (!fs.existsSync(filePath)) {
+          await msg.reply(`🤖: O sticker ${file} não está mais acessível`);
+          continue;
+        }
 
         const data = fs.readFileSync(filePath, { encoding: "base64" });
         const mimeType = file.endsWith(".mp4") ? "video/mp4" : "image/png";
-
         const media = new MessageMedia(mimeType, data, file);
+
         await client.sendMessage(chatId, media, { sendMediaAsSticker: true });
       }
+
+      await msg.reply(`Página ${page} de ${totalPages}`);
     } catch (err) {
-      console.error("Erro ao enviar todos os stickers:", err);
-      msg.reply("🤖: Erro ao recuperar seus stickers. Tente novamente mais tarde.");
+      console.error("Erro ao exibir stickers:", err);
+      return msg.reply("🤖: Ocorreu um erro ao exibir os stickers. Tente novamente mais tarde.");
     }
-    return;
   }
 
   // Usuário enviou mídia para gerar sticker
