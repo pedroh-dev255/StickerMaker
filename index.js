@@ -1,7 +1,10 @@
+require("dotenv").config();
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const fs = require("fs");
+const fsp = require("fs").promises;
 const path = require("path");
+const mysql = require("mysql2/promise");
 
 const waitingForSticker = new Map();
 
@@ -10,27 +13,61 @@ if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir);
 }
 
-const logFile = path.join(__dirname, "stickers.json");
-
-// Inicializa o log de stickers
-if (!fs.existsSync(logFile)) {
-  fs.writeFileSync(logFile, JSON.stringify({}, null, 2));
+// ----------------- Configuração do DB -----------------
+let dbPool;
+async function connectDB() {
+  dbPool = await mysql.createPool({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASS,
+    database: process.env.DB_NAME,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+  });
+  console.log("✅ Banco de dados conectado");
 }
 
-function loadLog() {
-  return JSON.parse(fs.readFileSync(logFile, "utf-8"));
+async function saveStickerToDB(contactName, contactId, isGroup, groupName, fileName) {
+  try {
+    await dbPool.execute(
+      `INSERT INTO stickers (contact_name, contact_id, is_group, group_name, file_name)
+       VALUES (?, ?, ?, ?, ?)`,
+      [contactName, contactId, isGroup ? 1 : 0, groupName, fileName]
+    );
+  } catch (err) {
+    console.error("Erro ao salvar sticker no DB:", err);
+    throw err;
+  }
 }
 
-function saveLog(data) {
-  fs.writeFileSync(logFile, JSON.stringify(data, null, 2));
+async function getStickersByContact(contactId) {
+  try {
+    const [rows] = await dbPool.execute(
+      "SELECT file_name FROM stickers WHERE contact_id = ? ORDER BY id ASC",
+      [contactId]
+    );
+    return rows.map((r) => r.file_name);
+  } catch (err) {
+    console.error("Erro ao obter stickers do DB:", err);
+    return [];
+  }
 }
 
-// Configuração do cliente WhatsApp
+// ----------------- Configuração do cliente WhatsApp -----------------
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--disable-gpu"
+    ],
   },
 });
 
@@ -43,76 +80,110 @@ client.on("ready", () => {
 });
 
 client.on("message", async (msg) => {
-  const chatId = msg.from;
+  // pega chat e contato (sempre tentei usar msg.getChat/getContact como você já estava fazendo)
+  let chat, contact;
+  try {
+    chat = await msg.getChat();
+  } catch (e) {
+    console.warn("Não foi possível obter chat:", e && e.message);
+  }
+  try {
+    contact = await msg.getContact();
+  } catch (e) {
+    console.warn("Não foi possível obter contact:", e && e.message);
+  }
+
+  const isGroup = chat ? !!chat.isGroup : false;
+  const contactName = (contact && (contact.pushname || contact.name)) || "Desconhecido";
+  const contactId = (contact && contact.id && contact.id._serialized) || (msg.author || msg.from);
+  const groupName = isGroup ? (chat.name || null) : null;
+
+  const chatId = msg.from; // mantém seu uso original para replies e para casos que queira identificar o chat de origem
 
   // Caso o usuário envie "!sticker"
-  if (msg.body.toLowerCase() === "!sticker") {
+  if (msg.body && msg.body.toLowerCase() === "!sticker") {
     waitingForSticker.set(chatId, true);
     return msg.reply("🤖: Envie agora uma *imagem* ou *vídeo* para transformar em sticker.");
   }
 
-  // Caso o usuário envie "!todos"
-  if (msg.body.toLowerCase() === "!todos") {
-    const logData = loadLog();
-    const userStickers = logData[chatId] || [];
+  // Caso o usuário envie "!todos" -> agora busca por contactId (stickers que o usuário criou)
+  if (msg.body && msg.body.toLowerCase() === "!todos") {
+    try {
+      const userStickers = await getStickersByContact(contactId);
 
-    if (userStickers.length === 0) {
-      return msg.reply("🤖: Nenhum sticker foi criado por você ainda.");
-    }
+      if (!userStickers || userStickers.length === 0) {
+        return msg.reply("🤖: Nenhum sticker foi criado por você ainda.");
+      }
 
-    for (const file of userStickers) {
-      const filePath = path.join(tempDir, file);
-      if (!fs.existsSync(filePath)) continue;
+      for (const file of userStickers) {
+        const filePath = path.join(tempDir, file);
+        if (!fs.existsSync(filePath)) continue;
 
-      const data = fs.readFileSync(filePath, { encoding: "base64" });
-      const mimeType = file.endsWith(".mp4") ? "video/mp4" : "image/png";
+        const data = fs.readFileSync(filePath, { encoding: "base64" });
+        const mimeType = file.endsWith(".mp4") ? "video/mp4" : "image/png";
 
-      const media = new MessageMedia(mimeType, data, file);
-      await client.sendMessage(chatId, media, { sendMediaAsSticker: true });
+        const media = new MessageMedia(mimeType, data, file);
+        await client.sendMessage(chatId, media, { sendMediaAsSticker: true });
+      }
+    } catch (err) {
+      console.error("Erro ao enviar todos os stickers:", err);
+      msg.reply("🤖: Erro ao recuperar seus stickers. Tente novamente mais tarde.");
     }
     return;
   }
 
   // Usuário enviou mídia para gerar sticker
   if (waitingForSticker.has(chatId)) {
-    if (msg.hasMedia) {
+    waitingForSticker.delete(chatId); // remove imediatamente para evitar duplicidade
+    msg.reply("🤖: Recebi sua mídia! Processando o sticker...");
+
+    // Processamento paralelo em segundo plano
+    (async () => {
       try {
-        const media = await msg.downloadMedia();
+        console.log("iniciando Download");
+        const media = await msg.downloadMedia({ unsafeMime: true });
+        console.log("download concluído");
 
         if (msg.type === "image" || msg.type === "video") {
           const ext = media.mimetype.includes("video") ? ".mp4" : ".png";
           const fileName = `sticker_${Date.now()}${ext}`;
           const filePath = path.join(tempDir, fileName);
 
-          fs.writeFileSync(filePath, media.data, "base64");
+          // Salva arquivo local em base64
+          await fsp.writeFile(filePath, media.data, "base64");
 
-          // Atualiza log
-          const logData = loadLog();
-          if (!logData[chatId]) logData[chatId] = [];
-          logData[chatId].push(fileName);
-          saveLog(logData);
+          // Salva no banco de dados
+          try {
+            await saveStickerToDB(contactName, contactId, isGroup, groupName, fileName);
+          } catch (err) {
+            console.error("Erro ao persistir no DB:", err);
+          }
 
-          // Enviar como sticker
+          // Envia como sticker
           await client.sendMessage(chatId, new MessageMedia(media.mimetype, media.data, null), {
             sendMediaAsSticker: true,
           });
 
-          msg.reply("✅ Sticker criado e salvo com sucesso!");
+          await client.sendMessage(chatId, "🤖: Sticker criado e salvo com sucesso!");
         } else {
-          msg.reply("🤖: Apenas imagem ou vídeo são aceitos para criar sticker. Processo cancelado.");
+          await client.sendMessage(chatId, "🤖: Apenas imagem ou vídeo são aceitos para criar sticker. Processo cancelado.");
         }
       } catch (err) {
         console.error("Erro ao processar mídia:", err);
-        msg.reply("🤖: Ocorreu um erro ao criar o sticker. Tente novamente.");
+        await client.sendMessage(chatId, "🤖: Ocorreu um erro ao criar o sticker. Tente novamente.");
       }
-
-      waitingForSticker.delete(chatId);
-    } else {
-      waitingForSticker.delete(chatId);
-      msg.reply("🤖: Nenhuma imagem/vídeo recebido. Processo cancelado.");
-    }
+    })();
   }
+
 });
 
-// Inicializar cliente
-client.initialize();
+// Inicializar DB e cliente
+(async () => {
+  try {
+    await connectDB();
+    client.initialize();
+  } catch (err) {
+    console.error("Erro na inicialização:", err);
+    process.exit(1);
+  }
+})();
