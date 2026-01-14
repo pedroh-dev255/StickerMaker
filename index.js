@@ -293,7 +293,7 @@ client.on("message", async (msg) => {
         }
       } catch (err) {
         console.error("Erro ao processar mídia:", err);
-        await client.sendMessage(chatId, "🤖: Ocorreu um erro ao criar o sticker. Tente novamente.");
+        await client.sendMessage(chatId, `🤖: Ocorreu um erro ao criar o sticker. Tente novamente.\n ${err}`);
       }
     })();
   }
