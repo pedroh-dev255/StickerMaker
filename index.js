@@ -69,6 +69,10 @@ const client = new Client({
       "--disable-gpu"
     ],
   },
+  webVersionCache: {
+        type: 'remote',
+        remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/refs/heads/main/html/2.3000.1031490220-alpha.html`,
+      },
 });
 
 client.on("qr", (qr) => {
@@ -225,6 +229,8 @@ client.on("message", async (msg) => {
 
       const perPage = 5;
       const totalPages = Math.ceil(stickers.length / perPage);
+
+      if(page == 1) msg.reply("🤖: Controle de exibição por paginas. Use !exibir [numero da pagina], para navegar entre paginas.\nExemplo '!exibir 2'. Para ver a segunda pagina etc.)");
 
       if (page < 1 || page > totalPages) {
         return msg.reply(`🤖: Página inválida. Informe um número entre 1 e ${totalPages}`);
