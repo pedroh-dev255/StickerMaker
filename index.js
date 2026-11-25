@@ -898,9 +898,317 @@ async function processBatch(sock, jid, queue) {
   );
 }
 
+// -------------------- Comando !tomarnocu --------------------
+// Comando que insulta todos os participantes do grupo, exceto quem executou o comando e os que estão na lista de exceções.
+
+
+const TOMAR_NOCU_EXCEPTIONS_FILE = path.join(
+  ROOT,
+  'tomarnocu-excecoes.json'
+);
+
+const TOMAR_NOCU_INSULTS = [
+  'vai tomar no cu',
+  'vai se foder',
+  'vai pro caralho',
+  'vai pro inferno',
+  'vai se lascar',
+  'vai se danar',
+  'vai se ferrar',
+  'vai se catar',
+  'Seca minha bct'
+];
+
+// Guarda o histórico de insultos por contato.
+// Cada contato percorre a lista antes de repetir.
+const insultHistory = new Map();
+
+// Carrega as exceções do JSON.
+async function getTomarNoCuExceptions() {
+  try {
+    const content = await fsp.readFile(
+      TOMAR_NOCU_EXCEPTIONS_FILE,
+      'utf8'
+    );
+
+    const exceptions = JSON.parse(content);
+
+    if (
+      !exceptions ||
+      typeof exceptions !== 'object' ||
+      Array.isArray(exceptions)
+    ) {
+      throw new Error('Formato inválido no JSON de exceções.');
+    }
+
+    return exceptions;
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      await fsp.writeFile(
+        TOMAR_NOCU_EXCEPTIONS_FILE,
+        '{}\n',
+        'utf8'
+      );
+
+      return {};
+    }
+
+    console.error(
+      '[TOMAR NOCU] Erro ao carregar exceções:',
+      error.message
+    );
+
+    return {};
+  }
+}
+
+// Normaliza números e JIDs para comparar contatos.
+function normalizeTomarNoCuId(id) {
+  if (!id) return '';
+
+  return String(id)
+    .split('@')[0]
+    .split(':')[0]
+    .replace(/\D/g, '');
+}
+
+// Procura exceções pelo JID completo ou pelo número.
+function findTomarNoCuException(exceptions, participant) {
+  const possibleIds = [
+    participant.id,
+    participant.phoneNumber,
+    participant.lid,
+  ].filter(Boolean);
+
+  for (const id of possibleIds) {
+    const normalized = normalizeTomarNoCuId(id);
+
+    for (const [key, value] of Object.entries(exceptions)) {
+      if (
+        key === id ||
+        normalizeTomarNoCuId(key) === normalized
+      ) {
+        return {
+          found: true,
+          insult: String(value ?? '').trim(),
+        };
+      }
+    }
+  }
+
+  return {
+    found: false,
+    insult: '',
+  };
+}
+
+// Seleciona insultos sem repetir até percorrer a lista.
+function getNextTomarNoCuInsult(contactId) {
+  let history = insultHistory.get(contactId);
+
+  if (!history || history.remaining.length === 0) {
+    const shuffled = [...TOMAR_NOCU_INSULTS];
+
+    // Embaralhamento Fisher-Yates.
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+
+      [shuffled[i], shuffled[j]] = [
+        shuffled[j],
+        shuffled[i],
+      ];
+    }
+
+    // Evita que o primeiro insulto do novo ciclo
+    // seja igual ao último do ciclo anterior.
+    if (
+      history?.last &&
+      shuffled.length > 1 &&
+      shuffled[0] === history.last
+    ) {
+      [shuffled[0], shuffled[1]] = [
+        shuffled[1],
+        shuffled[0],
+      ];
+    }
+
+    history = {
+      remaining: shuffled,
+      last: history?.last || null,
+    };
+  }
+
+  const insult = history.remaining.shift();
+
+  history.last = insult;
+
+  insultHistory.set(contactId, history);
+
+  return insult;
+}
+
+// Executa o comando no grupo.
+async function handleTomarNoCu(sock, message, sender) {
+  const jid = message.key.remoteJid;
+
+  if (!jid?.endsWith('@g.us')) {
+    await sendText(
+      sock,
+      jid,
+      '🤖 Esse comando só funciona em grupos.',
+      message
+    );
+
+    return;
+  }
+
+  try {
+    const metadata = await sock.groupMetadata(jid);
+
+    if (!metadata?.participants?.length) {
+      throw new Error('Não foi possível obter os participantes.');
+    }
+
+    const exceptions = await getTomarNoCuExceptions();
+
+    const creatorId =
+      message.key.participant ||
+      message.key.participantAlt ||
+      sender.contactId;
+
+    const creatorMention =
+      `@${String(creatorId).split('@')[0].split(':')[0]}`;
+
+    const botIds = [
+      sock.user?.id,
+      sock.user?.lid,
+    ].filter(Boolean);
+
+    const mentions = new Set([creatorId]);
+
+    const lines = [];
+
+    let ignored = 0;
+    let processed = 0;
+
+    for (const participant of metadata.participants) {
+      const participantId = participant.id;
+
+      if (!participantId) continue;
+
+      // Não marca o próprio bot.
+      const isBot = botIds.some(botId =>
+        botId === participantId ||
+        normalizeTomarNoCuId(botId) ===
+          normalizeTomarNoCuId(participantId)
+      );
+
+      if (isBot) continue;
+
+      // Não insulta quem executou o comando.
+      const isCreator =
+        participantId === creatorId ||
+        normalizeTomarNoCuId(participantId) ===
+          normalizeTomarNoCuId(creatorId) ||
+        (
+          participant.phoneNumber &&
+          normalizeTomarNoCuId(participant.phoneNumber) ===
+            normalizeTomarNoCuId(creatorId)
+        );
+
+      if (isCreator) continue;
+
+      // Verifica as exceções.
+      const exception = findTomarNoCuException(
+        exceptions,
+        participant
+      );
+
+      if (exception.found && !exception.insult) {
+        ignored++;
+        continue;
+      }
+
+      const insult = exception.found
+        ? exception.insult
+        : getNextTomarNoCuInsult(participantId);
+
+      const targetMention =
+        `@${String(participantId).split('@')[0].split(':')[0]}`;
+
+      mentions.add(participantId);
+
+      lines.push(
+        `${creatorMention} ${insult} ${targetMention}`
+      );
+
+      processed++;
+    }
+
+    if (!lines.length) {
+      await sendText(
+        sock,
+        jid,
+        '🤷‍♂️ Não encontrei ninguém para insultar. Todo mundo está protegido ou só sobrou você!',
+        message
+      );
+
+      return;
+    }
+
+    const header =
+      `🤡 *OPERAÇÃO TOMAR NO CU*\n` +
+      `━━━━━━━━━━━━━━━━━━\n`;
+
+    const footer =
+      `\n━━━━━━━━━━━━━━━━━━\n` +
+      `💀 Alvos: ${processed}\n` +
+      `🛡️ Ignorados pelas exceções: ${ignored}`;
+
+    await sock.sendMessage(
+      jid,
+      {
+        text: header + lines.join('\n') + footer,
+        mentions: [...mentions],
+      },
+      {
+        quoted: message,
+      }
+    );
+
+    console.log(
+      `[TOMAR NOCU] Grupo: ${metadata.subject} | ` +
+      `Alvos: ${processed} | Ignorados: ${ignored}`
+    );
+
+  } catch (error) {
+    console.error(
+      '[TOMAR NOCU] Erro:',
+      error
+    );
+
+    await sendText(
+      sock,
+      jid,
+      '🤖 Não consegui executar o comando. Verifique se o bot consegue acessar os participantes do grupo.',
+      message
+    );
+  }
+}
+
 async function handleCommand(sock, message, sender, text) {
   const jid = message.key.remoteJid;
   const lower = text.trim().toLowerCase();
+
+  if (lower === '!tomarnocu') {
+    await handleTomarNoCu(
+      sock,
+      message,
+      sender
+    );
+
+    return true;
+  }
 
   if (lower === '!sticker') {
     multiStickerSessions.delete(jid);
