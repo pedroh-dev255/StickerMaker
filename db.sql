@@ -8,6 +8,8 @@ CREATE TABLE stikermaker.stickers (
   contact_id VARCHAR(255) NOT NULL,
   is_group BOOLEAN NOT NULL,
   group_name VARCHAR(255),
+  is_sound TINYINT(1) NOT NULL DEFAULT 0,
+  audio_file_name VARCHAR(255) NULL,
   file_name VARCHAR(255) NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
