@@ -1257,11 +1257,11 @@ async function handleCommand(sock, message, sender, text) {
   ) {
     return true;
   }
-
+/*
   if (lower === '!tomarnocu') {
     await handleTomarNoCu(sock, message, sender);
     return true;
-  }
+  }*/
 
   // Inicia sessão individual.
   if (lower === '!sticker') {
