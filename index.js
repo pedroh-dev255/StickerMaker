@@ -778,6 +778,52 @@ const waitingForSticker = new Map();
 const multiStickerSessions = new Map();
 const processingChats = new Set();
 
+// Obtém os identificadores possíveis de quem enviou a mensagem.
+// O Baileys pode identificar o participante por PN ou LID.
+function getMessageParticipantIds(message) {
+  const jid = message.key.remoteJid || '';
+
+  const ids = jid.endsWith('@g.us')
+    ? [
+        message.key.participant,
+        message.key.participantAlt,
+      ]
+    : [jid];
+
+  return [...new Set(ids.filter(Boolean))];
+}
+
+// Cria uma sessão vinculada ao participante que iniciou.
+function createStickerSession(message) {
+  const ownerIds = getMessageParticipantIds(message);
+
+  return {
+    ownerIds,
+    ownerId: ownerIds[0] || null,
+    startedAt: Date.now(),
+  };
+}
+
+// Verifica se a mensagem pertence ao dono da sessão.
+function isStickerSessionOwner(session, message) {
+  if (!session) return false;
+
+  const incomingIds = getMessageParticipantIds(message);
+
+  return incomingIds.some(id =>
+    session.ownerIds.includes(id)
+  );
+}
+
+// Retorna a sessão ativa do grupo.
+function getActiveStickerSession(jid) {
+  return (
+    waitingForSticker.get(jid) ||
+    multiStickerSessions.get(jid) ||
+    null
+  );
+}
+
 async function sendText(sock, jid, text, quoted) {
   return sock.sendMessage(
     jid,
@@ -1196,23 +1242,35 @@ async function handleTomarNoCu(sock, message, sender) {
   }
 }
 
+
 async function handleCommand(sock, message, sender, text) {
   const jid = message.key.remoteJid;
   const lower = text.trim().toLowerCase();
 
-  if (lower === '!tomarnocu') {
-    await handleTomarNoCu(
-      sock,
-      message,
-      sender
-    );
+  // Verifica se já existe uma sessão neste grupo.
+  const activeSession = getActiveStickerSession(jid);
 
+  // Outra pessoa não pode assumir ou modificar a sessão.
+  if (
+    activeSession &&
+    !isStickerSessionOwner(activeSession, message)
+  ) {
     return true;
   }
 
+  if (lower === '!tomarnocu') {
+    await handleTomarNoCu(sock, message, sender);
+    return true;
+  }
+
+  // Inicia sessão individual.
   if (lower === '!sticker') {
     multiStickerSessions.delete(jid);
-    waitingForSticker.set(jid, true);
+
+    waitingForSticker.set(
+      jid,
+      createStickerSession(message)
+    );
 
     await sendText(
       sock,
@@ -1224,9 +1282,14 @@ async function handleCommand(sock, message, sender, text) {
     return true;
   }
 
+  // Inicia sessão de múltiplos stickers.
   if (lower === '!stickers') {
     waitingForSticker.delete(jid);
-    multiStickerSessions.set(jid, []);
+
+    multiStickerSessions.set(jid, {
+      ...createStickerSession(message),
+      queue: [],
+    });
 
     await sendText(
       sock,
@@ -1238,8 +1301,17 @@ async function handleCommand(sock, message, sender, text) {
     return true;
   }
 
-  if (lower === '!pronto' && multiStickerSessions.has(jid)) {
-    const queue = multiStickerSessions.get(jid) || [];
+  // Finaliza somente a sessão de quem executou !stickers.
+  if (lower === '!pronto') {
+    const session = multiStickerSessions.get(jid);
+
+    if (!session) return false;
+
+    if (!isStickerSessionOwner(session, message)) {
+      return true;
+    }
+
+    const queue = session.queue || [];
 
     multiStickerSessions.delete(jid);
 
@@ -1406,19 +1478,38 @@ Para exibir os stickers, digite !exibir`,
   return false;
 }
 
+
+
 async function handleIncomingMessage(sock, message) {
   if (!message.message || message.key.fromMe) return;
 
   const jid = message.key.remoteJid;
+
   if (!jid || jid === 'status@broadcast') return;
 
   const sender = getSender(message);
 
-  // Extrai o texto do conteúdo real da mensagem recebida
   const text = getText(message.message);
-
   const type = getMediaType(message.message);
 
+  // --------------------------------------------------
+  // PROTEÇÃO DE SESSÃO POR PARTICIPANTE
+  // --------------------------------------------------
+
+  const activeSession = getActiveStickerSession(jid);
+
+  if (
+    activeSession &&
+    !isStickerSessionOwner(activeSession, message)
+  ) {
+    // Não responde, não adiciona mídia e não executa comandos.
+    // A mensagem de outra pessoa é completamente ignorada.
+    return;
+  }
+
+  // --------------------------------------------------
+  // PROCESSAMENTO DE COMANDOS
+  // --------------------------------------------------
 
   if (
     text &&
@@ -1427,7 +1518,18 @@ async function handleIncomingMessage(sock, message) {
     return;
   }
 
-  if (waitingForSticker.has(jid)) {
+  // --------------------------------------------------
+  // STICKER INDIVIDUAL
+  // --------------------------------------------------
+
+  const waitingSession = waitingForSticker.get(jid);
+
+  if (waitingSession) {
+    // Segurança adicional: somente o dono pode enviar a mídia.
+    if (!isStickerSessionOwner(waitingSession, message)) {
+      return;
+    }
+
     if (!type) {
       await sendText(
         sock,
@@ -1467,8 +1569,19 @@ async function handleIncomingMessage(sock, message) {
     return;
   }
 
-  if (multiStickerSessions.has(jid) && type) {
-    const queue = multiStickerSessions.get(jid);
+  // --------------------------------------------------
+  // MÚLTIPLOS STICKERS
+  // --------------------------------------------------
+
+  const multiSession = multiStickerSessions.get(jid);
+
+  if (multiSession && type) {
+    // Segurança adicional: somente o dono pode adicionar mídias.
+    if (!isStickerSessionOwner(multiSession, message)) {
+      return;
+    }
+
+    const queue = multiSession.queue;
 
     const mediaPromise = downloadIncomingMedia(
       sock,
@@ -1488,8 +1601,11 @@ async function handleIncomingMessage(sock, message) {
       `📥 Mídia adicionada à fila (${queue.length}). Envie mais ou digite !pronto.`,
       message
     );
+
+    return;
   }
 }
+
 
 // -------------------- Inicialização / reconexão --------------------
 
