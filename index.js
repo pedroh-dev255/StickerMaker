@@ -226,10 +226,40 @@ async function sendSoundSticker(sock, jid, webpPath, oggPath, quoted) {
     .finish();
 
   const sticker = stickerUpload.stickerMessage;
+  const dimensions = await new Promise((resolve, reject) => {
+    const child = spawn(FFPROBE, [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height',
+      '-of', 'json',
+      webpPath,
+    ]);
 
+    let output = '';
+
+    child.stdout.on('data', d => output += d.toString());
+    child.on('error', reject);
+
+    child.on('close', code => {
+      if (code !== 0) {
+        return reject(new Error('Falha ao obter dimensões do sticker.'));
+      }
+
+      try {
+        const stream = JSON.parse(output).streams[0];
+        resolve({
+          width: stream.width,
+          height: stream.height,
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+
+  sticker.width = dimensions.width;
+  sticker.height = dimensions.height;
   sticker.isAnimated = true;
-  sticker.width = STICKER_SIZE;
-  sticker.height = STICKER_SIZE;
 
   attachStickerAudio(sticker.fileSha256, audioBytes);
 
@@ -372,26 +402,22 @@ async function hasAudio(file) {
   });
 }
 
+
 async function convertImageToWebp(input, output) {
   await run(FFMPEG, [
     '-y',
-    '-i',
-    input,
-    '-frames:v',
-    '1',
+    '-i', input,
+    '-frames:v', '1',
     '-vf',
-    `scale=${STICKER_SIZE}:${STICKER_SIZE}:force_original_aspect_ratio=decrease,pad=${STICKER_SIZE}:${STICKER_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`,
-    '-vcodec',
-    'libwebp',
-    '-lossless',
-    '0',
-    '-q:v',
-    '80',
-    '-compression_level',
-    '6',
+    `scale=${STICKER_SIZE}:${STICKER_SIZE}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
+    '-vcodec', 'libwebp',
+    '-lossless', '0',
+    '-q:v', '85',
+    '-compression_level', '6',
     output,
   ]);
 }
+
 
 
 async function convertVideoToSticker(input, webpOutput, audioOutput) {
@@ -421,10 +447,11 @@ async function convertVideoToSticker(input, webpOutput, audioOutput) {
   let finalFps = 0;
 
   for (const profile of profiles) {
+    
     const filter =
       `fps=${profile.fps},` +
-      `scale=${profile.size}:${profile.size}:force_original_aspect_ratio=decrease,` +
-      `pad=${profile.size}:${profile.size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
+      `scale=${profile.size}:${profile.size}:force_original_aspect_ratio=decrease,`;
+
 
     for (const quality of profile.qualities) {
       await run(FFMPEG, [
@@ -454,7 +481,6 @@ async function convertVideoToSticker(input, webpOutput, audioOutput) {
         finalQuality = quality;
         finalSize = stat.size;
         finalFps = profile.fps;
-        finalSize = profile.size;
         break;
       }
     }
@@ -513,7 +539,7 @@ async function convertVideoToSilentSticker(input, output) {
   );
 
   const filter =
-    `fps=10,scale=${STICKER_SIZE}:${STICKER_SIZE}:force_original_aspect_ratio=decrease,pad=${STICKER_SIZE}:${STICKER_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
+    `fps=10,scale=${STICKER_SIZE}:${STICKER_SIZE}:force_original_aspect_ratio=decrease:force_divisible_by=2`;
 
   for (const q of [65, 55, 45, 35, 25, 18]) {
     await run(FFMPEG, [
